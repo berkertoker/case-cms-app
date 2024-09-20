@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const csvParser = require('csv-parser'); // Package import for process a CSV file
+const csvParser = require('csv-parser');
 
 module.exports = {
   async afterCreate(event) {
@@ -13,7 +13,7 @@ module.exports = {
 };
 
 async function processCsvFile(event) {
-  const { result } = event;
+  const { result, params } = event;
   let csvFileUrl = null;
 
   // Check if there is a CSV file
@@ -21,22 +21,22 @@ async function processCsvFile(event) {
     csvFileUrl = result.uc_field.url;
   }
 
-  if (csvFileUrl) {
-     // Path to the file on the server
+  // Fetch the previous record to compare the CSV file URL
+  const previousRecord = await strapi.entityService.findOne('api::faq.faq', result.id);
+
+  // If the CSV file has changed or hasn't been processed yet
+  if (csvFileUrl && (csvFileUrl !== previousRecord.uc_field?.url || !previousRecord.csvProcessed)) {
     const csvFilePath = path.join(__dirname, '../../../../../public', csvFileUrl);
-    // FAQ's id
     const faqId = result.id;
 
     const faqQuestions = [];
-    // A flag to keep track of whether the first line has been skipped
-    let isFirstRow = true; 
+    let isFirstRow = true;
 
     await new Promise((resolve, reject) => {
       fs.createReadStream(csvFilePath)
         .pipe(csvParser({ headers: ['question', 'answer'] }))
         .on('data', (row) => {
           if (isFirstRow) {
-            //Skip the first line because the first line is usually formatted
             isFirstRow = false;
             return;
           }
@@ -44,7 +44,6 @@ async function processCsvFile(event) {
           faqQuestions.push({
             question: row.question,
             answer: row.answer,
-            // Relation betweenn FAQ-Questions and FAQ
             faq: faqId,
           });
         })
@@ -52,11 +51,26 @@ async function processCsvFile(event) {
         .on('error', reject);
     });
 
-    // Add the data to the FAQ-Questions table one by one
+    // Find all existing FAQ questions associated with this FAQ
+    const existingFaqQuestions = await strapi.entityService.findMany('api::faq-question.faq-question', {
+      filters: { faq: faqId },
+    });
+
+    // Delete each of the found FAQ questions
+    for (const faqQuestion of existingFaqQuestions) {
+      await strapi.entityService.delete('api::faq-question.faq-question', faqQuestion.id);
+    }
+
+    // Add the new data from the CSV file
     for (const faqQuestion of faqQuestions) {
       await strapi.entityService.create('api::faq-question.faq-question', {
         data: faqQuestion,
       });
     }
+
+    // Mark the CSV as processed
+    await strapi.entityService.update('api::faq.faq', faqId, {
+      data: { csvProcessed: true },
+    });
   }
 }
